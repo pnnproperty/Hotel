@@ -2,8 +2,10 @@
 
 Project ini sudah dikonfigurasi untuk:
 - ✅ Deploy ke **Vercel** via Nitro Vercel preset
-- ✅ **9 ElevenLabs client tools** untuk agent voice (JARVIS)
+- ✅ **12 ElevenLabs client tools** untuk agent voice (JARVIS)
 - ✅ Integrasi **Supabase** untuk data backend
+- ✅ File viewer dengan support PDF, image, Office docs, text
+- ✅ Tab management — agent bisa close modal & tab yang dia buka
 
 ## Perubahan dari ZIP asli Lovable
 
@@ -17,17 +19,20 @@ Project ini sudah dikonfigurasi untuk:
 | `src/components/pheip/PolluxMallAgent.tsx` | Tambah 7 client tools baru |
 | `src/components/pheip/external-content-panel.tsx` | File baru — modal overlay |
 
-## 9 Client Tools yang Tersedia
+## 12 Client Tools yang Tersedia
 
 | Tool | Function |
 |---|---|
 | `navigateToModule` | Pindah ke route modul (`/finance`, `/occupancy`, dst) |
 | `showAlert` | Banner notification pojok kanan atas |
-| `openExternalLink` | Buka URL di tab baru |
+| `openExternalLink` | Buka URL di tab baru (track-able untuk close nanti) |
 | `showVideo` | Embed YouTube/Vimeo/MP4 dalam modal |
 | `showWebSearch` | Tampilkan hasil web search di overlay |
 | `showEmail` | Email viewer/composer modal |
 | `showIframe` | Embed website dalam modal |
+| `showFile` | **NEW** — Preview file dari URL (PDF/image/Office/text) |
+| `pickFile` | **NEW** — Dialog pilih file lokal user, preview hasilnya |
+| `closeAll` | **NEW** — Tutup semua modal & tab yang agent buka |
 | `getDashboardMetric` | Query data spesifik (existing) |
 | `getActiveModule` | Cek modul aktif (existing) |
 
@@ -182,7 +187,44 @@ Parameters:
 - `url` (string, required)
 - `title` (string, optional)
 
-### 8 & 9: getDashboardMetric, getActiveModule
+### 8. showFile (NEW)
+
+| Field | Value |
+|---|---|
+| Name | `showFile` |
+| Wait for response | ✓ Yes |
+| Description | Previews a file from a URL in an overlay. Supports PDF (native viewer), images (jpg/png/gif/webp/svg), Office docs (docx/xlsx/pptx via Office Online), and text files (txt/md/csv/json/code). Use when discussing reports, contracts, charts, or any document. The URL must be publicly accessible — use Supabase Storage public URLs or any CDN. |
+
+Parameters:
+- `url` (string, required) — Full public https:// URL to the file
+- `title` (string, optional) — Display name in toolbar
+- `fileKind` (string, optional) — Force type: `pdf`, `image`, `office`, `text`, `other`. Auto-detected from extension if omitted
+- `mimeType` (string, optional) — Help with auto-detection
+
+### 9. pickFile (NEW)
+
+| Field | Value |
+|---|---|
+| Name | `pickFile` |
+| Wait for response | ✓ Yes |
+| Description | Opens a file picker dialog for the user to choose a local file. Returns file metadata (name, size, type) and previews the first selected file. Use when the user asks you to analyze, summarize, or work with a file from their computer. Browser security prevents reading files without the user explicitly choosing them. |
+
+Parameters:
+- `accept` (string, optional) — MIME type filter, e.g. `image/*`, `.pdf,.docx`
+- `multiple` (boolean, optional) — Allow selecting multiple files
+
+### 10. closeAll (NEW)
+
+| Field | Value |
+|---|---|
+| Name | `closeAll` |
+| Wait for response | ✓ Yes |
+| Description | Closes overlays and tabs that were opened. Useful when the user is done viewing content or asks to "close everything", "tutup", "close this", "clear screen". Browser security only allows closing tabs that this script opened — not the main dashboard tab or user's other tabs. |
+
+Parameters:
+- `what` (string, optional) — `modals` (close overlays only), `tabs` (close opened tabs only), `everything` (default — both)
+
+### 11 & 12: getDashboardMetric, getActiveModule
 
 Sudah ada di kode existing — pastikan juga terdaftar di dashboard.
 
@@ -273,12 +315,31 @@ Setelah deploy + tools registered, buka URL Vercel Anda, klik voice orb, coba:
 | "Play a video about luxury hospitality" | YouTube modal |
 | "Draft an email to GM about RevPAR drop" | Email modal with draft |
 | "Open Bloomberg dot com" | New tab opens |
+| "Show me the Q3 report PDF" | showFile → PDF preview modal |
+| "Tampilkan dokumen kontrak" | File preview from public URL |
+| "Pick a file from my computer" | File picker dialog opens |
+| "Saya mau analyze foto cuaca" | pickFile with `accept: "image/*"` |
+| "Close all this" / "tutup semua" | closeAll → modal + tabs closed |
+| "Done with this report" | closeAll modals |
+
+## Capability Limitations (Browser Security)
+
+| Aksi | Bisa? | Catatan |
+|---|---|---|
+| Tutup modal yang agent buka | ✅ Bisa | `closeAll` |
+| Tutup tab yang agent buka | ⚠️ Setengah | Hanya kalau `closable: true` (drop noopener) |
+| Tutup tab Anda yang lain | ❌ Tidak | Browser security — script tidak boleh sentuh tab lain |
+| Tutup tab utama (dashboard) | ❌ Tidak | Tidak ada cara reliable untuk tutup tab sendiri |
+| Buka file user dari disk otomatis | ❌ Tidak | User HARUS klik file picker dulu (privasi) |
+| Tampilkan file dari URL/CDN | ✅ Bisa | `showFile` — PDF, image, Office, text |
+| Tampilkan file dari Supabase Storage | ✅ Bisa | Generate public URL → kirim ke `showFile` |
+| Baca file content (untuk analisa) | ⚠️ Indirect | `pickFile` return metadata; untuk analisa LLM butuh server tool yang baca file |
 
 ## Troubleshooting
 
 ### Error "Client tool with name X is not defined on client"
 Tool terdaftar di dashboard tapi belum ada di kode (atau sebaliknya). 
-Bandingkan list tools di dashboard dengan 9 tools di Step 3. Hapus yang 
+Bandingkan list tools di dashboard dengan 12 tools di Step 3. Hapus yang 
 tidak match atau tambahkan ke kode.
 
 ### Build error di Vercel "Module not found: nitro/vite"

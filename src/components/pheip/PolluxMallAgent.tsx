@@ -5,7 +5,7 @@ import { Mic, MicOff, X, Settings, Volume2, Loader2, Diamond, Hand } from "lucid
 import { useRouterState, useNavigate } from "@tanstack/react-router";
 import { buildSnapshot, snapshotToPrompt, lookupMetric, moduleLabels } from "@/lib/dashboard-context";
 import { cn } from "@/lib/utils";
-import { ExternalContentPanel, type ExternalContent, type SearchResult } from "./external-content-panel";
+import { ExternalContentPanel, type ExternalContent, type SearchResult, type FileKind } from "./external-content-panel";
 
 const STORAGE_KEY = "pollux.elevenlabs.agentId";
 const CLAP_KEY = "pollux.clapActivation";
@@ -15,6 +15,33 @@ function pathToModule(path: string): string {
   const seg = path.split("/").filter(Boolean)[0];
   if (!seg) return "executive";
   return seg;
+}
+
+/** Detect file type for preview rendering based on filename or MIME. */
+function detectFileKind(pathOrName: string, mimeType?: string): FileKind {
+  const lower = pathOrName.toLowerCase();
+  const mime = mimeType?.toLowerCase() ?? "";
+
+  if (mime.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|svg|bmp|avif)$/i.test(lower)) {
+    return "image";
+  }
+  if (mime === "application/pdf" || /\.pdf$/i.test(lower)) {
+    return "pdf";
+  }
+  if (
+    mime.includes("officedocument") ||
+    /\.(docx|xlsx|pptx|doc|xls|ppt)$/i.test(lower)
+  ) {
+    return "office";
+  }
+  if (
+    mime.startsWith("text/") ||
+    mime === "application/json" ||
+    /\.(txt|md|csv|json|xml|yaml|yml|log|html|css|js|ts|tsx|jsx|py|rb|go|rs|java|c|cpp|sh)$/i.test(lower)
+  ) {
+    return "text";
+  }
+  return "other";
 }
 
 export function PolluxMallAgent() {
@@ -51,8 +78,13 @@ function VoiceOrbInner({ activeModule }: { activeModule: string }) {
     type: "info" | "success" | "warning";
   } | null>(null);
 
-  // External content overlay (video / email / search / iframe)
+  // External content overlay (video / email / search / iframe / file)
   const [externalContent, setExternalContent] = useState<ExternalContent | null>(null);
+
+  // Track tabs/windows that the agent opens via openExternalLink, so
+  // closeAllTabs can shut them later. Browser only lets us close
+  // windows that THIS script opened.
+  const openedTabsRef = useRef<Window[]>([]);
 
   useEffect(() => { moduleRef.current = activeModule; }, [activeModule]);
 
@@ -102,14 +134,20 @@ function VoiceOrbInner({ activeModule }: { activeModule: string }) {
       },
 
       // === Open external URL in new tab ===
-      openExternalLink: (params: { url: string; reason?: string }) => {
+      // Tracks the opened window so closeAllTabs can shut it later.
+      // Note: passing "noopener" returns null and prevents close — we keep
+      // noopener for security; closeAllTabs will only close trackable wins.
+      openExternalLink: (params: { url: string; reason?: string; closable?: boolean }) => {
         try {
           const url = new URL(params.url);
           if (!["http:", "https:"].includes(url.protocol)) {
             return "Only http/https URLs are allowed.";
           }
-          window.open(url.toString(), "_blank", "noopener,noreferrer");
-          return `Opened ${url.hostname} in a new tab.`;
+          // If agent explicitly wants closable, drop noopener (less secure)
+          const features = params.closable ? "" : "noopener,noreferrer";
+          const win = window.open(url.toString(), "_blank", features);
+          if (win) openedTabsRef.current.push(win);
+          return `Opened ${url.hostname} in a new tab${params.closable ? " (closable)" : ""}.`;
         } catch {
           return `Invalid URL: ${params.url}`;
         }
@@ -190,6 +228,132 @@ function VoiceOrbInner({ activeModule }: { activeModule: string }) {
         } catch {
           return `Invalid URL: ${params.url}`;
         }
+      },
+
+      // === Show a file (PDF, image, doc) from a URL in an overlay ===
+      // Supports: PDFs (native browser viewer), images (jpg/png/gif/webp/svg),
+      // Office docs (docx/xlsx/pptx via Office Online viewer — requires public URL),
+      // text files (.txt/.json/.csv/.md inline), other types (download fallback).
+      showFile: (params: { url: string; title?: string; fileKind?: FileKind; mimeType?: string }) => {
+        if (!params.url) return "Missing file URL.";
+        try {
+          const url = new URL(params.url);
+          if (!["http:", "https:"].includes(url.protocol)) {
+            return "Only http/https URLs allowed.";
+          }
+          // Auto-detect kind from extension if not provided
+          const kind: FileKind = params.fileKind ?? detectFileKind(url.pathname, params.mimeType);
+          setExternalContent({
+            kind: "file",
+            url: url.toString(),
+            fileKind: kind,
+            title: params.title,
+            mimeType: params.mimeType,
+          });
+          return `Showing file (${kind}): ${params.title || url.pathname.split("/").pop()}`;
+        } catch {
+          return `Invalid URL: ${params.url}`;
+        }
+      },
+
+      // === Ask the user to pick a local file ===
+      // Returns metadata about the picked file. We CAN'T silently read user's
+      // disk — browser requires the user click to choose. So this opens a
+      // file picker dialog and waits for selection.
+      pickFile: async (params: { accept?: string; multiple?: boolean }) => {
+        return new Promise<string>((resolve) => {
+          const input = document.createElement("input");
+          input.type = "file";
+          if (params.accept) input.accept = params.accept;
+          if (params.multiple) input.multiple = true;
+
+          let resolved = false;
+          input.onchange = () => {
+            resolved = true;
+            const files = Array.from(input.files ?? []);
+            if (files.length === 0) {
+              resolve("User cancelled file picker.");
+              return;
+            }
+            const info = files.map((f) => ({
+              name: f.name,
+              size: f.size,
+              type: f.type || "unknown",
+              lastModified: new Date(f.lastModified).toISOString(),
+            }));
+
+            // Show first file as preview if it's a known previewable type
+            const first = files[0];
+            if (!first) {
+              resolve(`User selected ${files.length} file(s): ${JSON.stringify(info)}`);
+              return;
+            }
+            const objUrl = URL.createObjectURL(first);
+            const kind = detectFileKind(first.name, first.type);
+            setExternalContent({
+              kind: "file",
+              url: objUrl,
+              fileKind: kind,
+              title: first.name,
+              mimeType: first.type,
+            });
+
+            resolve(
+              `User selected ${files.length} file(s). First: ${first.name} (${(first.size / 1024).toFixed(1)} KB). ` +
+              `All files: ${JSON.stringify(info)}`,
+            );
+          };
+
+          // If user closes the dialog without choosing (browser doesn't fire
+          // a reliable "cancel" event everywhere), set a 60s timeout fallback.
+          setTimeout(() => {
+            if (!resolved) resolve("File picker timed out — user didn't choose a file.");
+          }, 60_000);
+
+          input.click();
+        });
+      },
+
+      // === Close all overlays and any tabs the agent opened ===
+      // Browser security: we can only close windows that THIS script opened,
+      // and only those NOT opened with noopener. Tabs opened by the user
+      // manually CANNOT be closed.
+      closeAll: (params: { what?: "modals" | "tabs" | "everything" }) => {
+        const what = params.what ?? "everything";
+        let closedModal = false;
+        let closedTabs = 0;
+        let unclosable = 0;
+
+        if (what === "modals" || what === "everything") {
+          if (externalContent !== null) {
+            setExternalContent(null);
+            closedModal = true;
+          }
+          setAgentNotification(null);
+        }
+
+        if (what === "tabs" || what === "everything") {
+          for (const win of openedTabsRef.current) {
+            if (!win || win.closed) continue;
+            try {
+              win.close();
+              if (win.closed) closedTabs++;
+              else unclosable++;
+            } catch {
+              unclosable++;
+            }
+          }
+          // Clear the list — closed wins are dead, unclosed we can't touch anyway
+          openedTabsRef.current = [];
+        }
+
+        const parts: string[] = [];
+        if (closedModal) parts.push("closed open modal");
+        if (closedTabs > 0) parts.push(`closed ${closedTabs} tab(s)`);
+        if (unclosable > 0) parts.push(`${unclosable} tab(s) couldn't be closed (browser security)`);
+        if (parts.length === 0) parts.push("nothing to close");
+
+        return parts.join(", ") + ".";
       },
     },
     onConnect: () => {

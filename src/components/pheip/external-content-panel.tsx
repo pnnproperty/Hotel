@@ -1,20 +1,24 @@
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Play, Mail, Globe, ExternalLink, Search } from "lucide-react";
+import { X, Play, Mail, Globe, ExternalLink, Search, FileText, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ===================================================================
 //  External Content Panel
 //  ----------------------------------------------------------------
 //  Renders agent-driven content overlays: videos, emails, search
-//  results, and external website previews. Mounted globally and
-//  controlled via state in the VoiceOrb component.
+//  results, files, and external website previews. Mounted globally
+//  and controlled via state in the VoiceOrb component.
 // ===================================================================
+
+export type FileKind = "pdf" | "image" | "office" | "text" | "other";
 
 export type ExternalContent =
   | { kind: "video"; provider: "youtube" | "vimeo" | "direct"; videoId: string; title?: string }
   | { kind: "email"; to: string; subject: string; body: string; from?: string }
   | { kind: "search"; query: string; results: SearchResult[]; answerBox?: string }
-  | { kind: "iframe"; url: string; title?: string };
+  | { kind: "iframe"; url: string; title?: string }
+  | { kind: "file"; url: string; fileKind: FileKind; title?: string; mimeType?: string };
 
 export interface SearchResult {
   title: string;
@@ -55,6 +59,7 @@ export function ExternalContentPanel({ content, onClose }: Props) {
                 {content.kind === "email" && <><Mail className="w-3.5 h-3.5" /> Email</>}
                 {content.kind === "search" && <><Search className="w-3.5 h-3.5" /> Web Search</>}
                 {content.kind === "iframe" && <><Globe className="w-3.5 h-3.5" /> External</>}
+                {content.kind === "file" && <><FileText className="w-3.5 h-3.5" /> File · {content.fileKind.toUpperCase()}</>}
               </div>
               <button
                 onClick={onClose}
@@ -71,6 +76,7 @@ export function ExternalContentPanel({ content, onClose }: Props) {
               {content.kind === "email" && <EmailPanel content={content} />}
               {content.kind === "search" && <SearchPanel content={content} />}
               {content.kind === "iframe" && <IframePanel content={content} />}
+              {content.kind === "file" && <FilePanel content={content} />}
             </div>
           </motion.div>
         </motion.div>
@@ -226,5 +232,116 @@ function IframePanel({ content }: { content: Extract<ExternalContent, { kind: "i
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       />
     </div>
+  );
+}
+
+// -------------------------------------------------------------------
+//  File sub-panel — renders PDFs, images, Office docs in-place
+// -------------------------------------------------------------------
+function FilePanel({ content }: { content: Extract<ExternalContent, { kind: "file" }> }) {
+  const { url, fileKind, title } = content;
+
+  const filename = title || url.split("/").pop()?.split("?")[0] || "file";
+
+  return (
+    <div className="h-[75vh] flex flex-col">
+      {/* Toolbar */}
+      <div className="px-5 py-2 text-xs font-mono text-muted-foreground border-b border-border flex items-center gap-3">
+        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+        <span className="truncate flex-1">{filename}</span>
+        <a
+          href={url}
+          download={filename}
+          className="flex items-center gap-1 hover:text-foreground transition"
+        >
+          <Download className="w-3 h-3" />
+          <span>Download</span>
+        </a>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1 hover:text-foreground transition"
+        >
+          <ExternalLink className="w-3 h-3" />
+          <span>Open</span>
+        </a>
+      </div>
+
+      {/* Body — different rendering based on file kind */}
+      <div className="flex-1 bg-secondary/20 flex items-center justify-center overflow-auto">
+        {fileKind === "image" && (
+          <img
+            src={url}
+            alt={filename}
+            className="max-w-full max-h-full object-contain"
+          />
+        )}
+
+        {fileKind === "pdf" && (
+          // Native browser PDF viewer. Most browsers support this.
+          <iframe
+            src={url}
+            title={filename}
+            className="w-full h-full border-0 bg-white"
+          />
+        )}
+
+        {fileKind === "office" && (
+          // Office Online viewer can render .docx/.xlsx/.pptx publicly accessible URLs
+          <iframe
+            src={`https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}`}
+            title={filename}
+            className="w-full h-full border-0 bg-white"
+          />
+        )}
+
+        {fileKind === "text" && (
+          // Inline text/code preview
+          <TextFilePreview url={url} filename={filename} />
+        )}
+
+        {fileKind === "other" && (
+          <div className="text-center p-8 space-y-3">
+            <FileText className="w-12 h-12 mx-auto text-muted-foreground" />
+            <div className="text-sm">{filename}</div>
+            <div className="text-xs text-muted-foreground">
+              This file type cannot be previewed inline. Use Download or Open to view it.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Fetches text content and shows it in a scrollable <pre>.
+// Limited to ~500KB to avoid jamming the UI with massive files.
+function TextFilePreview({ url, filename }: { url: string; filename: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(url)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.text();
+      })
+      .then((t) => {
+        if (cancelled) return;
+        setText(t.length > 500_000 ? t.slice(0, 500_000) + "\n\n... [truncated, file too large]" : t);
+      })
+      .catch((e) => !cancelled && setError(e.message));
+    return () => { cancelled = true; };
+  }, [url]);
+
+  if (error) return <div className="p-6 text-sm text-muted-foreground">Failed to load: {error}</div>;
+  if (text === null) return <div className="p-6 text-sm text-muted-foreground">Loading {filename}…</div>;
+
+  return (
+    <pre className="w-full h-full p-6 text-xs font-mono whitespace-pre-wrap text-foreground/90 overflow-auto bg-background">
+      {text}
+    </pre>
   );
 }
